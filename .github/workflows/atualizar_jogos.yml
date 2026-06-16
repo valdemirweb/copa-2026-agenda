@@ -1,0 +1,36 @@
+name: Atualizar Jogos da Copa Diariamente
+
+on:
+  schedule:
+    # Executa todos os dias às 06:00 da manhã (Horário de Brasília)
+    - cron: '0 9 * * *'
+  workflow_dispatch: # Adiciona um botão para atualizar manualmente quando você quiser
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Baixar o código do repositório
+      uses: actions/checkout@v4
+
+    - name: Configurar o Python no servidor
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Instalar as bibliotecas necessárias
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests beautifulsoup4
+
+    - name: Executar o script de raspagem
+      run: python app.py
+
+    - name: Salvar e publicar o novo index.html automaticamente
+      run: |
+        git config --global user.name "Bot de Atualização"
+        git config --global user.email "bot@github.com"
+        git add index.html
+        git commit -m "🤖 [Bot] Jogos do dia atualizados automaticamente" || exit 0
+        git push
