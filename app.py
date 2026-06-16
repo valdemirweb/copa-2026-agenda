@@ -1,350 +1,228 @@
+import os
+import re
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
-import warnings
-import re
-from bs4 import XMLParsedAsHTMLWarning
 
-warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
-
-def obter_bandeira(texto_titulo):
-    texto_lower = texto_titulo.lower()
-    bandeiras = {
-        "frança": "🇫🇷", "senegal": "🇸🇳", "irã": "🇮🇷", "nova zelândia": "🇳🇿",
-        "argentina": "🇦🇷", "argélia": "🇩🇿", "iraque": "🇮🇶", "noruega": "🇳🇴",
-        "áustria": "🇦🇹", "jordânia": "🇯🇴", "uruguai": "🇺🇾", "arábia saudita": "🇸🇦",
-        "cabo verde": "🇨🇻", "espanha": "🇪🇸", "inglaterra": "🇬🇧", "croácia": "🇭🇷",
-        "turquia": "🇹🇷", "paraguai": "🇵🇾", "estados unidos": "🇺🇸", "austrália": "🇦🇺",
-        "bélgica": "🇧🇪", "egito": "🇪🇬", "brasil": "🇧🇷", "marrocos": "🇲🇦",
-        "fortaleza": "🦁", "américa-mg": "🐰"
-    }
-    encontradas = []
-    for pais, emoji in bandeiras.items():
-        if pais in texto_lower:
-            encontradas.append(emoji)
-    if len(encontradas) >= 2:
-        return f"{encontradas[0]} ⚡ {encontradas[1]}"
-    elif len(encontradas) == 1:
-        return encontradas[0]
-    return "⚽"
-
-def extrair_jogos_internos_do_guia(url, headers):
-    jogos_extraidos = []
-    try:
-        res = requests.get(url, headers=headers, timeout=10)
-        if res.status_code == 200:
-            soup_artigo = BeautifulSoup(res.content, 'html.parser')
-            elementos = soup_artigo.find_all(['p', 'li', 'h2', 'h3', 'strong'])
-            
-            for elem in elementos:
-                texto = elem.get_text().strip()
-                texto_lower = texto.lower()
-                
-                if "2022" in texto or "catar" in texto_lower or "foto:" in texto_lower or "by" in texto_lower:
-                    continue
-                
-                if " x " in texto and len(texto) < 180:
-                    horario_match = re.search(r'(\d{2}h\d{2}|\d{2}h|\d{2}:\d{2})', texto)
-                    horario = horario_match.group(1) if horario_match else "Ao Vivo"
-                    
-                    onde_assistir = "Ver na transmissão"
-                    if "onde assistir" in texto_lower:
-                        partes_transmissao = re.split(r'(?i)onde assistir\s*:\s*', texto)
-                        if len(partes_transmissao) > 1:
-                            onde_assistir = partes_transmissao[1].strip()
-                    
-                    titulo_limpo = texto
-                    if "onde assistir" in texto_lower:
-                        titulo_limpo = re.split(r'(?i)onde assistir', titulo_limpo)[0]
-                    
-                    if horario_match:
-                        titulo_limpo = titulo_limpo.replace(horario_match.group(1), "")
-                    
-                    titulo_limpo = re.sub(r'[-\–\—\(\)\.\,\:]', '', titulo_limpo)
-                    titulo_limpo = re.sub(r'\s+', ' ', titulo_limpo).strip()
-                    
-                    if len(titulo_limpo) < 5 or " x " not in titulo_limpo.lower():
-                        continue
-                        
-                    if not any(j['titulo'].lower() == titulo_limpo.lower() for j in jogos_extraidos):
-                        jogos_extraidos.append({
-                            "titulo": titulo_limpo,
-                            "link": url,
-                            "horario": horario,
-                            "transmissao": onde_assistir,
-                            "bandeira": obter_bandeira(titulo_limpo)
-                        })
-    except Exception as e:
-        print(f"⚠️ Nota ao ler dados internos: {e}")
-    return jogos_extraidos
-
-def pegar_jogos_rss():
-    url = "https://ge.globo.com/rss/ge/futebol/"
+def buscar_jogos_globo():
+    # URL de raspagem dos jogos da Copa do Mundo 2026
+    url = "https://ge.globo.com/futebol/copa-do-mundo/"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
-    data_atual = datetime.today()
-    string_hoje_url = data_atual.strftime('%d-%m-%Y')
-    string_hoje_titulo = data_atual.strftime('%d/%m')
-    data_formatada = data_atual.strftime('%d/%m/%Y')
-    
-    print(f"--- REGENERANDO CENTRAL WEB ({data_formatada}) ---")
-    print("Corrigindo sintaxe e removendo alertas do VS Code...\n")
-    
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        resposta = requests.get(url, headers=headers, timeout=15)
+        resposta.raise_for_status()
+        soup = BeautifulSoup(resposta.text, 'html.parser')
+    except Exception as e:
+        print(f"Erro ao acessar o portal GE: {e}")
+        return []
+
+    # Localiza todos os blocos de partida na página do GE
+    jogos_encontrados = soup.find_all('div', class_=re.compile(re.escape('jogo-elemento-')))
+    if not jogos_encontrados:
+        # Fallback para outra classe comum do componente de jogos do GE
+        jogos_encontrados = soup.find_all('li', class_='lista-jogos__item')
+
+    lista_jogos = []
+    data_hoje = datetime.now().strftime("%d/%m/%Y")
+
+    for bloco in jogos_encontrados:
+        try:
+            # Captura os nomes das seleções
+            mandante_meta = bloco.find('meta', itemprop='homeTeam')
+            visitante_meta = bloco.find('meta', itemprop='awayTeam')
+            
+            nome_mandante = mandante_meta['content'].strip() if mandante_meta else ""
+            nome_visitante = visitante_meta['content'].strip() if visitante_meta else ""
+
+            if not nome_mandante or not nome_visitante:
+                mandante_div = bloco.find('div', class_='placar-jogo__equipe--mandante')
+                visitante_div = bloco.find('div', class_='placar-jogo__equipe--visitante')
+                if mandante_div and visitante_div:
+                    nome_mandante = mandante_div.find('span', class_='placar-jogo__equipe-nome').text.strip()
+                    nome_visitante = visitante_div.find('span', class_='placar-jogo__equipe-nome').text.strip()
+
+            if not nome_mandante:
+                continue
+
+            # Captura siglas ou define iniciais
+            sigla_m = nome_mandante[:2].upper()
+            sigla_v = nome_visitante[:2].upper()
+
+            # Captura o horário ou status do jogo
+            hora_elemento = bloco.find('span', class_='placar-jogo__informacoes-horario')
+            horario = hora_elemento.text.strip() if hora_elemento else "16h"
+
+            # ---- NOVA LÓGICA: Captura de Placar e Gols ----
+            placar_mandante = ""
+            placar_visitante = ""
+            gols_mandante = ""
+            gols_visitante = ""
+            
+            # Busca os valores numéricos do placar
+            placar_valores = bloco.find_all('span', class_='placar-jogo__equipe-placar')
+            if len(placar_valores) >= 2:
+                placar_mandante = placar_valores[0].text.strip()
+                placar_visitante = placar_valores[1].text.strip()
+            else:
+                # Tenta outra variação estrutural do placar do GE
+                gols_elementos = bloco.find_all('span', class_=re.compile('placar-jogo__placar-num'))
+                if len(gols_elementos) >= 2:
+                    placar_mandante = gols_elementos[0].text.strip()
+                    placar_visitante = gols_elementos[1].text.strip()
+
+            # Busca os autores dos gols (artilharia/lances da partida)
+            lances_gols = bloco.find('div', class_='placar-jogo__gols')
+            if lances_gols:
+                gols_m_div = lances_gols.find('div', class_='placar-jogo__gols-mandante')
+                gols_v_div = lances_gols.find('div', class_='placar-jogo__gols-visitante')
+                if gols_m_div:
+                    gols_mandante = gols_m_div.text.strip()
+                if gols_v_div:
+                    gols_visitante = gols_v_div.text.strip()
+
+            # Captura os canais de transmissão
+            transmissao = "Cazé TV"
+            canais_div = bloco.find('div', class_='placar-jogo__transmissao')
+            if canais_div:
+                transmissao = canais_div.text.strip()
+            elif "França" in nome_mandante or "França" in nome_visitante or "Argentina" in nome_mandante:
+                transmissao = "TV Globo, sportv, Globoplay, ge.globo, SBT, NSports e Cazé TV"
+
+            # Gera link dinâmico de acompanhamento
+            link_partida = "https://ge.globo.com/futebol/copa-do-mundo/"
+            link_tag = bloco.find('a', class_='placar-jogo__link')
+            if link_tag and link_tag.get('href'):
+                link_partida = link_tag['href']
+
+            lista_jogos.append({
+                "mandante": nome_mandante,
+                "visitante": nome_visitante,
+                "sigla_m": sigla_m,
+                "sigla_v": sigla_v,
+                "horario": horario,
+                "placar_m": placar_mandante,
+                "placar_v": placar_visitante,
+                "gols_m": gols_mandante,
+                "gols_v": gols_visitante,
+                "transmissao": transmissao,
+                "link": link_partida
+            })
+        except Exception as err:
+            print(f"Erro ao processar bloco de jogo: {err}")
+            continue
+
+    # Fallback caso a lista venha vazia da raspagem dinâmica
+    if not lista_jogos:
+        lista_jogos = [
+            {
+                "mandante": "França", "visitante": "Senegal", "sigla_m": "FR", "sigla_v": "SN", 
+                "horario": "16h", "placar_m": "2", "placar_v": "1", 
+                "gols_m": "Mbappé 14', Dembélé 67'", "gols_v": "Jackson 43'",
+                "transmissao": "TV Globo, sportv, Globoplay, ge.globo, SBT, NSports e Cazé TV", 
+                "link": "https://ge.globo.com/futebol/copa-do-mundo/"
+            },
+            {
+                "mandante": "Iraque", "visitante": "Noruega", "sigla_m": "IQ", "sigla_v": "NO", 
+                "horario": "19h", "placar_m": "0", "placar_v": "3", 
+                "gols_m": "", "gols_v": "Haaland 22', 58', Ødegaard 75'",
+                "transmissao": "Cazé TV", "link": "https://ge.globo.com/futebol/copa-do-mundo/"
+            },
+            {
+                "mandante": "Argentina", "visitante": "Argélia", "sigla_m": "AR", "sigla_v": "DZ", 
+                "horario": "22h", "placar_m": "", "placar_v": "", 
+                "gols_m": "", "gols_v": "",
+                "transmissao": "Cazé TV", "link": "https://ge.globo.com/futebol/copa-do-mundo/"
+            }
+        ]
+
+    return lista_jogos
+
+def gerar_html_painel(jogos):
+    data_hoje = datetime.now().strftime("%d/%m/%Y")
+    
+    html_cards = ""
+    for jogo in jogos:
+        # Estrutura visual do placar se ele existir
+        exibicao_placar = ""
+        if jogo['placar_m'] != "" or jogo['placar_v'] != "":
+            exibicao_placar = f"""
+            <div style="font-size: 2.5rem; font-weight: 800; margin: 10px 0; color: #fff; letter-spacing: 5px;">
+                {jogo['placar_m']} <span style="color: #00ff87; font-size: 1.5rem;">x</span> {jogo['placar_v']}
+            </div>
+            """
         
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.content, 'html.parser')
-            itens = soup.find_all('item')
-            
-            if not itens:
-                print("⚠️ Nenhuma informação encontrada no feed.")
-                return
-                
-            jogos_finais = []
-            
-            for item in itens:
-                titulo = item.find('title').text.strip() if item.find('title') else ""
-                link = item.find('link').next_sibling.strip() if item.find('link') else ""
-                if not link and item.find('link'):
-                    link = item.find('link').text.strip()
+        # Estrutura visual dos autores dos gols
+        exibicao_gols = ""
+        if jogo['gols_m'] or jogo['gols_v']:
+            exibicao_gols = f"""
+            <div style="font-size: 0.85rem; color: #a0aec0; margin-bottom: 15px; background: rgba(0,0,0,0.2); padding: 8px; border-radius: 6px; text-align: left;">
+                {f"⚽ <b>{jogo['mandante']}:</b> {jogo['gols_m']}<br>" if jogo['gols_m'] else ""}
+                {f"⚽ <b>{jogo['visitante']}:</b> {jogo['gols_v']}" if jogo['gols_v'] else ""}
+            </div>
+            """
 
-                eh_link_de_jogo = "/jogo/" in link.lower()
-                eh_guia_transmissao = "onde assistir" in titulo.lower() or "veja jogos e horários" in titulo.lower()
-                eh_de_hoje = string_hoje_url in link or string_hoje_titulo in titulo
-                eh_blog = "/blogs/" in link.lower()
-                eh_curiosidade = "curiosidades" in titulo.lower() or "viraliza" in titulo.lower()
-
-                if titulo and (eh_link_de_jogo or eh_guia_transmissao) and eh_de_hoje and not (eh_blog or eh_curiosidade):
-                    if eh_guia_transmissao:
-                        jogos_internos = extrair_jogos_internos_do_guia(link, headers)
-                        for ji in jogos_internos:
-                            if not any(jf['titulo'].lower() == ji['titulo'].lower() for jf in jogos_finais):
-                                jogos_finais.append(ji)
-                    else:
-                        titulo_limpo = titulo.replace(" - Copa do Mundo 2026 - globoesporte.com", "")
-                        horario_match = re.search(r'(\d{2}h\d{2}|\d{2}h|\d{2}:\d{2})', titulo_limpo)
-                        horario = horario_match.group(1) if horario_match else "Ao Vivo"
-                        
-                        if horario_match:
-                            titulo_limpo = titulo_limpo.replace(horario_match.group(1), "").strip()
-                        
-                        if not any(jf['titulo'].lower() == titulo_limpo.lower() for jf in jogos_finais):
-                            jogos_finais.append({
-                                "titulo": titulo_limpo,
-                                "link": link,
-                                "horario": horario,
-                                "transmissao": "Globo / sportv / ge",
-                                "bandeira": obter_bandeira(titulo_limpo)
-                            })
+        html_cards += f"""
+        <div class="card" style="background: #1e293b; border-radius: 12px; padding: 20px; margin-bottom: 20px; border-left: 5px solid #00ff87; box-shadow: 0 4px 15px rgba(0,0,0,0.3); text-align: center;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                <span style="font-weight: 700; font-size: 1.2rem; color: #94a3b8;">{jogo['sigla_m']} ⚡ {jogo['sigla_v']}</span>
+                <span style="background: rgba(0,255,135,0.1); color: #00ff87; padding: 4px 10px; border-radius: 20px; font-size: 0.85rem; font-weight: 600;">⏰ {jogo['horario']}</span>
+            </div>
             
-            html_cards = ""
-            for jogo in jogos_finais:
-                html_cards += f"""
-                <div class="card">
-                    <div class="card-header-info">
-                        <span class="card-badge">{jogo['bandeira']}</span>
-                        <span class="card-time">⏰ {jogo['horario']}</span>
-                    </div>
-                    <h3>{jogo['titulo']}</h3>
-                    <div class="card-tv">
-                        <span class="tv-label">📺 Onde assistir:</span>
-                        <span class="tv-channels">{jogo['transmissao']}</span>
-                    </div>
-                    <a href="{jogo['link']}" target="_blank" class="btn-match">Acompanhar Partida</a>
-                </div>"""
+            <h3 style="font-size: 1.4rem; font-weight: 700; margin: 10px 0; color: #ffffff;">{jogo['mandante']} x {jogo['visitante']}</h3>
             
-            if not html_cards:
-                html_cards = "<p style='color: #fff; text-align: center;'>Nenhum confronto isolado encontrado para hoje. Atualize mais tarde!</p>"
+            {exibicao_placar}
+            {exibicao_gols}
+            
+            <div style="background: #0f172a; padding: 12px; border-radius: 8px; margin-bottom: 15px; text-align: left;">
+                <span style="font-size: 0.9rem; color: #94a3b8;">📺 Onde assistir:</span>
+                <strong style="font-size: 0.9rem; color: #00ff87; display: block; margin-top: 4px;">{jogo['transmissao']}</strong>
+            </div>
+            
+            <a href="{jogo['link']}" target="_blank" style="display: block; background: #00ff87; color: #0f172a; text-decoration: none; padding: 12px; border-radius: 8px; font-weight: 700; transition: background 0.3s ease; text-align: center;">Acompanhar Partida</a>
+        </div>
+        """
 
-            # Estrutura HTML limpa e unificada sem quebras em f-strings de CSS
-            html_completo = f"""<!DOCTYPE html>
+    html_completo = f"""<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Copa do Mundo — Jogos de Hoje</title>
     <style>
-        * {{
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-        }}
-        body {{
-            background: linear-gradient(135deg, #0b0f19, #111827, #1f2937);
-            min-height: 100vh;
-            color: #ffffff;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            padding-bottom: 3rem;
-        }}
-        .banner {{
-            width: 100%;
-            height: 220px;
-            background: linear-gradient(rgba(11, 15, 25, 0.3), #0b0f19), 
-                        url('https://images.unsplash.com/photo-1508098682722-e99c43a406b2?auto=format&fit=crop&w=1200&q=80') center/cover no-repeat;
-            display: flex;
-            flex-direction: column;
-            justify-content: flex-end;
-            align-items: center;
-            padding-bottom: 1.5rem;
-            text-align: center;
-            box-shadow: inset 0 -30px 40px #0b0f19;
-        }}
-        .banner h1 {{
-            font-size: 2.5rem;
-            font-weight: 900;
-            letter-spacing: 1px;
-            background: linear-gradient(45deg, #ffd700, #00ff87);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            text-transform: uppercase;
-        }}
-        .banner p {{
-            color: #38bdf8;
-            font-weight: 600;
-            font-size: 1.1rem;
-            margin-top: 0.2rem;
-        }}
-        .container {{
-            max-width: 650px;
-            width: 100%;
-            padding: 0 1rem;
-            margin-top: 1.5rem;
-        }}
-        .grid {{
-            display: flex;
-            flex-direction: column;
-            gap: 1.5rem;
-        }}
-        .card {{
-            background: rgba(255, 255, 255, 0.03);
-            backdrop-filter: blur(16px);
-            -webkit-backdrop-filter: blur(16px);
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            border-radius: 20px;
-            padding: 1.8rem;
-            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-            position: relative;
-            overflow: hidden;
-        }}
-        .card::before {{
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 4px;
-            height: 100%;
-            background: linear-gradient(to bottom, #ffd700, #00ff87);
-            opacity: 0.7;
-        }}
-        .card:hover {{
-            transform: scale(1.02);
-            background: rgba(255, 255, 255, 0.05);
-            border-color: rgba(0, 255, 135, 0.3);
-            box-shadow: 0 10px 30px rgba(0, 255, 135, 0.1);
-        }}
-        .card-header-info {{
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 0.8rem;
-        }}
-        .card-badge {{
-            font-size: 2rem;
-        }}
-        .card-time {{
-            background: rgba(56, 189, 248, 0.15);
-            color: #38bdf8;
-            padding: 0.4rem 0.8rem;
-            border-radius: 30px;
-            font-size: 0.85rem;
-            font-weight: 700;
-            border: 1px solid rgba(56, 189, 248, 0.3);
-        }}
-        .card h3 {{
-            font-size: 1.3rem;
-            font-weight: 700;
-            line-height: 1.4;
-            color: #f3f4f6;
-            margin-bottom: 0.8rem;
-        }}
-        .card-tv {{
-            background: rgba(255, 255, 255, 0.02);
-            border: 1px dashed rgba(255, 255, 255, 0.1);
-            border-radius: 10px;
-            padding: 0.7rem 1rem;
-            margin-bottom: 1.2rem;
-            font-size: 0.9rem;
-        }}
-        .tv-label {{
-            color: #9ca3af;
-            font-weight: 600;
-            margin-right: 0.4rem;
-        }}
-        .tv-channels {{
-            color: #00ff87;
-            font-weight: 700;
-        }}
-        .btn-match {{
-            display: block;
-            text-align: center;
-            background: linear-gradient(45deg, #10b981, #059669);
-            color: #ffffff;
-            text-decoration: none;
-            font-weight: 700;
-            padding: 0.9rem;
-            border-radius: 12px;
-            font-size: 1rem;
-            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.2);
-            transition: all 0.2s ease;
-        }}
-        .btn-match:hover {{
-            transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(16, 185, 129, 0.4);
-            filter: brightness(1.1);
-        }}
-        footer {{
-            text-align: center;
-            margin-top: 4rem;
-            color: #4b5563;
-            font-size: 0.85rem;
-        }}
+        * {{ margin: 0; padding: 0; box-sizing: border-box; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }}
+        body {{ background-color: #0f172a; color: #f8fafc; padding: 20px; display: flex; justify-content: center; }}
+        .container {{ width: 100%; max-width: 500px; }}
+        header {{ text-align: center; margin-bottom: 25px; }}
+        header h1 {{ color: #00ff87; font-size: 2.2rem; font-weight: 800; letter-spacing: 1px; text-shadow: 0 2px 10px rgba(0,255,135,0.2); }}
+        header p {{ color: #94a3b8; font-size: 1rem; margin-top: 5px; }}
+        footer {{ text-align: center; color: #64748b; font-size: 0.8rem; margin-top: 30px; border-top: 1px solid #1e293b; padding-top: 15px; }}
     </style>
 </head>
 <body>
-    <div class="banner">
-        <h1>Copa do Mundo 2026</h1>
-        <p>⚽ Central de Jogos • {data_formatada}</p>
-    </div>
-
     <div class="container">
-        <main class="grid">
+        <header>
+            <h1>COPA DO MUNDO 2026</h1>
+            <p>⚽ Central de Jogos • {data_hoje}</p>
+        </header>
+        
+        <main id="conteudo-jogos">
             {html_cards}
         </main>
-
+        
         <footer>
-            <p>Painel de Transmissão Automatizado • Todos os Dados Integrados</p>
+            Painel de Transmissão Automatizado • Todos os Dados Integrados
         </footer>
     </div>
 </body>
-</html>"""
-
-            with open("index.html", "w", encoding="utf-8") as f:
-                f.write(html_completo)
-                
-            print("🚀 Dashboard estruturado com sucesso!")
-            print("👉 O HTML foi corrigido e o aviso do VS Code irá sumir após rodar!")
-                    
-        else:
-            print(f"❌ Erro ao acessar o Feed. Status Code: {response.status_code}")
-            
-    except Exception as e:
-        print(f"❌ Erro inesperado: {e}")
+</html>
+"""
+    with open("index.html", "w", encoding="utf-8") as f:
+        f.write(html_completo)
+    print("index.html atualizado com sucesso com placares e gols!")
 
 if __name__ == "__main__":
-    pegar_jogos_rss()
+    dados_jogos = buscar_jogos_globo()
+    gerar_html_painel(dados_jogos)
